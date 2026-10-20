@@ -32,7 +32,7 @@ use crate::strategy_registration::{STATE_ACTIVE, STATE_PENDING, STATE_RETIRED};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, IntoVal, TryFromVal, Vec,
+    contract, contractimpl, contracttype, token, Address, Env, IntoVal, Symbol, TryFromVal, Vec,
 };
 
 #[contract]
@@ -1754,6 +1754,122 @@ fn test_withdrawal_cooldown_then_timelock_then_execute() {
     // execute_withdrawal works
     let executed = vault.execute_withdrawal(&user);
     assert_eq!(executed, 50_000);
+}
+
+// ─── 12. Large withdrawal pending-state guards (Issues #1680, #1681) ─────────
+
+#[test]
+fn test_second_large_withdrawal_rejected_while_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (vault, _, usdc_sa, _) = setup_vault(&env);
+    let user = Address::generate(&env);
+    usdc_sa.mint(&user, &100_000);
+
+    vault.set_large_withdrawal_threshold(&1000);
+    vault.deposit(&user, &100_000);
+
+    // First large withdrawal queues a pending timelocked withdrawal.
+    assert_eq!(vault.withdraw(&user, &50_000), 0);
+    assert_eq!(
+        vault.pending_withdrawal(&user),
+        Some(PendingWithdrawal {
+            shares: 50_000,
+            unlock_timestamp: 100 + 86_400,
+        })
+    );
+
+    // A second large withdrawal while one is pending is rejected.
+    let result = vault.try_withdraw(&user, &25_000);
+    assert_eq!(result, Err(Ok(VaultError::WithdrawalCooldownActive)));
+
+    // The original pending entry is untouched: no silent overwrite, no new timelock.
+    let pending = vault.pending_withdrawal(&user).unwrap();
+    assert_eq!(pending.shares, 50_000);
+    assert_eq!(pending.unlock_timestamp, 100 + 86_400);
+}
+
+#[test]
+fn test_cancel_withdrawal_requires_user_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (vault, _, usdc_sa, _) = setup_vault(&env);
+    let user = Address::generate(&env);
+    usdc_sa.mint(&user, &100_000);
+
+    vault.set_large_withdrawal_threshold(&1000);
+
+    vault.deposit(&user, &100_000);
+    assert_eq!(vault.withdraw(&user, &50_000), 0);
+    assert!(vault.pending_withdrawal(&user).is_some());
+
+    // The owner can cancel (auth satisfied via mock_all_auths).
+    vault.cancel_withdrawal(&user);
+    assert_eq!(vault.pending_withdrawal(&user), None);
+}
+
+#[test]
+fn test_cancel_withdrawal_without_pending_returns_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (vault, _, _, _) = setup_vault(&env);
+    let user = Address::generate(&env);
+
+    let result = vault.try_cancel_withdrawal(&user);
+    assert_eq!(result, Err(Ok(VaultError::NoPendingWithdrawal)));
+}
+
+#[test]
+fn test_cancel_withdrawal_then_new_withdrawal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (vault, _, usdc_sa, _) = setup_vault(&env);
+    let user = Address::generate(&env);
+    usdc_sa.mint(&user, &100_000);
+
+    vault.set_large_withdrawal_threshold(&1000);
+    vault.deposit(&user, &100_000);
+
+    vault.withdraw(&user, &50_000);
+    assert!(vault.pending_withdrawal(&user).is_some());
+
+    vault.cancel_withdrawal(&user);
+    assert_eq!(vault.pending_withdrawal(&user), None);
+
+    // Cancel clears the way for a new large withdrawal with a fresh timelock.
+    assert_eq!(vault.withdraw(&user, &50_000), 0);
+    assert_eq!(vault.pending_withdrawal(&user).unwrap().shares, 50_000);
+}
+
+#[test]
+fn test_cancel_withdrawal_emits_pndwcn_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (vault, _, usdc_sa, _) = setup_vault(&env);
+    let user = Address::generate(&env);
+    usdc_sa.mint(&user, &100_000);
+
+    vault.set_large_withdrawal_threshold(&1000);
+    vault.deposit(&user, &100_000);
+    vault.withdraw(&user, &50_000);
+    vault.cancel_withdrawal(&user);
+
+    let mut found = false;
+    for event in env.events().all().iter() {
+        if !event.1.is_empty() {
+            if let Ok(topic) = Symbol::try_from_val(&env, &event.1.get(0).unwrap()) {
+                if topic == symbol_short!("pndwcn") {
+                    found = true;
+                }
+            }
+        }
+    }
+    assert!(found, "expected `pndwcn` cancel event");
 }
 
 // ─── 11. batch_deposit ────────────────────────────────────────────────────────

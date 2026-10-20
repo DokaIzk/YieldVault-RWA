@@ -858,11 +858,6 @@ impl YieldVault {
                 .get(&DataKey::LastStrategySwitchTime)
                 .unwrap_or(0);
             let earliest_switch = last_switch.saturating_add(cooldown);
-            if env.ledger().timestamp() < earliest_switch {
-            let earliest_switch = last_switch.checked_add(cooldown).expect("overflow");
-            if now < earliest_switch {
-                return Err(VaultError::AdminParamChangeTooSoon);
-            }
         }
 
         let current_strategy = Self::strategy(env.clone());
@@ -1476,43 +1471,18 @@ impl YieldVault {
                     let oracle_client = OracleClient::new(&env, &oracle_addr);
                     let price_data = oracle_client.get_price(&token, &token);
                     let max_age = Self::oracle_heartbeat(env.clone());
-                    let last: Option<oracle::PriceData> = env
-                        .storage()
-                        .instance()
-                        .get(&DataKeyExt::Risk(RiskExtKey::LastPx));
-                    let _last_price = Self::last_oracle_price(&env);
                     let last_price = Self::last_oracle_price(&env);
                     oracle::OracleValidator::validate_price_data(
                         &env,
                         &price_data,
                         max_age,
                         Some(oracle::MAX_PRICE_DEVIATION_BPS),
-                        last.as_ref(),
                         last_price.as_ref(),
                     )
                     .map_err(|_| VaultError::OracleValidationFailed)?;
                     Self::set_last_oracle_price(&env, &price_data);
                 }
-        let token = Self::token(env.clone());
-        if Self::is_oracle_enabled(env.clone()) {
-            if let Some(oracle_addr) = Self::price_oracle(env.clone()) {
-                let oracle_client = OracleClient::new(&env, &oracle_addr);
-                let price_data = oracle_client.get_price(&token, &token);
-                let max_age = Self::oracle_heartbeat(env.clone());
-                let last_price = Self::last_oracle_price(&env);
-                oracle::OracleValidator::validate_price_data(
-                    &env,
-                    &price_data,
-                    max_age,
-                    Some(oracle::MAX_PRICE_DEVIATION_BPS),
-                    last_price.as_ref(),
-                )
-                .map_err(|_| VaultError::OracleValidationFailed)?;
-                Self::set_last_oracle_price(&env, &price_data);
             }
-        }
-
-        let strategy_assets = if let Some(strategy_addr) = Self::strategy(env.clone()) {
             Self::require_valid_strategy_response(&env, &strategy_addr, &token)
         } else {
             0
@@ -2850,6 +2820,10 @@ impl YieldVault {
     /// is created with a 24-hour timelock. Call `execute_withdrawal` after the
     /// timelock expires to complete the transfer.
     ///
+    /// A user with a pending large withdrawal cannot queue another one: the
+    /// request is rejected until the pending withdrawal is executed or
+    /// cancelled with [`Self::cancel_withdrawal`] (#1680).
+    ///
     /// ### Parameters
     /// * `user` - The share holder (requires auth).
     /// * `shares` - The number of shares to burn.
@@ -2907,6 +2881,14 @@ impl YieldVault {
                 .map_err(|_| VaultError::MathOverflow)?;
 
         if assets_to_return > threshold {
+            // A user may not queue a second large withdrawal while one is
+            // already pending (#1680): the pending request must be executed
+            // or cancelled first, so we never silently overwrite it and
+            // restart its 24-hour timelock.
+            if env.storage().instance().has(&DataKey::PendingWithdrawal(user.clone())) {
+                return Err(VaultError::WithdrawalCooldownActive);
+            }
+
             // Create a pending withdrawal with a 24-hour timelock
             let unlock_ts = env
                 .ledger()
@@ -2969,6 +2951,39 @@ impl YieldVault {
         .map_err(|_| VaultError::MathOverflow)?;
 
         Self::do_withdraw(&env, &mut state, user, pending.shares, assets_to_return)
+    }
+
+    /// Returns the pending large withdrawal for `user`, if one exists.
+    pub fn pending_withdrawal(env: Env, user: Address) -> Option<PendingWithdrawal> {
+        env.storage().instance().get(&DataKey::PendingWithdrawal(user))
+    }
+
+    /// Cancel a pending large withdrawal before its timelock expires.
+    ///
+    /// The caller must own the pending withdrawal (`user.require_auth()`).
+    /// Cancelling removes the pending entry so the user can submit a new
+    /// withdrawal instead of waiting out the 24-hour timelock (#1681).
+    ///
+    /// ### Errors
+    /// * [`VaultError::NoPendingWithdrawal`] - no pending withdrawal exists
+    ///   for `user`.
+    pub fn cancel_withdrawal(env: Env, user: Address) -> Result<(), VaultError> {
+        user.require_auth();
+
+        let pending: PendingWithdrawal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingWithdrawal(user.clone()))
+            .ok_or(VaultError::NoPendingWithdrawal)?;
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingWithdrawal(user.clone()));
+
+        env.events()
+            .publish((symbol_short!("pndwcn"), user), (pending.shares, pending.unlock_timestamp));
+
+        Ok(())
     }
 
     /// Internal: burns shares, transfers assets, updates state.

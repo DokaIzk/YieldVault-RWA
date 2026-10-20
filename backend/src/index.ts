@@ -11,6 +11,7 @@ initTracing();
 
 import 'express-async-errors';
 import express, { Express, Request, Response, NextFunction, ErrorRequestHandler } from 'express';
+import helmet from 'helmet';
 import { loginHandler, nonceHandler, refreshHandler, requireAuth, revokeAccessToken, revokeAllAccessTokens, revokeCurrentSession, revokeAllSessions } from './auth';
 import vaultListRouter from './routes/vaults';
 import {
@@ -641,6 +642,29 @@ async function handleTransactionExport(req: Request, res: Response): Promise<voi
 // included in all 429 responses by the handlers in rateLimiter.ts.
 
 // â”€â”€â”€ Middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// Security headers (Issue #1676). Applied before routes so every response,
+// including Swagger UI, receives them. HSTS is production-only.
+app.use(
+  helmet({
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"],
+      },
+    },
+    // HSTS only tells browsers to use HTTPS in production; in development and
+    // test it must not be set (it would break local HTTP tooling).
+    strictTransportSecurity:
+      nodeEnv === 'production'
+        ? { includeSubDomains: true, maxAge: 31536000, preload: true }
+        : false,
+  })
+);
 
 app.use(tieredJsonBodyParser());
 
@@ -4839,7 +4863,6 @@ if (process.env.NODE_ENV !== 'test') {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-  eventOutboxService.start();
 
   // Register graceful shutdown for the outbox processor so pending events
   // are not abandoned when the process receives a termination signal.
@@ -4849,18 +4872,7 @@ if (process.env.NODE_ENV !== 'test') {
   shutdownHandler.onShutdown(async () => {
     eventOutboxService.stop();
   });
-  const shutdownController = new AbortController();
-  const shutdownSignal = shutdownController.signal;
-  eventOutboxService.start({ signal: shutdownSignal });
-
-  // Register graceful shutdown for the outbox processor: abort in-flight work
-  // and wait for the poller to drain before the process tears down resources.
-  const stopOutbox = () => {
-    shutdownController.abort();
-    void eventOutboxService.stop();
-  };
-  process.on('SIGTERM', stopOutbox);
-  process.on('SIGINT', stopOutbox);
+  eventOutboxService.start();
 }
 
 

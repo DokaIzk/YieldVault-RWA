@@ -100,4 +100,49 @@ describe('GracefulShutdownHandler', () => {
     expect(handler.isShuttingDown()).toBe(true);
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
+
+  // Issue #1675: one shutdown path — the handler registered in index.ts runs
+  // outbox, then DB cleanup, in a documented order after the HTTP server has
+  // drained in-flight requests.
+  it('runs onShutdown tasks in documented order after the server drains', async () => {
+    const server = http.createServer((_req, res) => {
+      // Hold the socket open briefly so the drain step is exercised.
+      setTimeout(() => {
+        res.writeHead(200);
+        res.end('ok');
+      }, 50);
+    });
+    await listen(server);
+
+    const order: string[] = [];
+    const handler = new GracefulShutdownHandler(2000, 50);
+    handler.register(server);
+
+    // Documented order (matches index.ts): background jobs/outbox first, DB last.
+    handler.onShutdown(async () => {
+      order.push('outbox-stop');
+    });
+    handler.onShutdown(async () => {
+      order.push('db-disconnect');
+    });
+
+    let serverClosed = false;
+    await new Promise<void>((resolve) => {
+      server.close(() => {
+        serverClosed = true;
+        resolve();
+      });
+    });
+
+    process.emit('SIGTERM');
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(handler.isShuttingDown()).toBe(true);
+    // Server closes before cleanup tasks run.
+    expect(serverClosed).toBe(true);
+    // Cleanup tasks run in registration order: outbox before DB.
+    expect(order).toEqual(['outbox-stop', 'db-disconnect']);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
 });

@@ -13,10 +13,8 @@
 //! - Migration-safe updates: old and new signer sets coexist during transition
 //! - Operations require threshold signatures from the current active set
 
-use soroban_sdk::{Address, Vec};
-use crate::VaultError;
-use crate::VaultError;
 use soroban_sdk::{Address, Env, Map, Vec};
+use crate::VaultError;
 
 /// Verifies that the caller is the admin
 ///
@@ -49,15 +47,11 @@ pub fn require_pauser_or_admin_auth(
     caller.require_auth();
     let is_admin = caller == admin;
     let is_pauser = pauser.map_or(false, |p| caller == p);
-    if !(is_admin || is_pauser) {
-        return Err(VaultError::RescueUnauthorized);
+    if is_admin || is_pauser {
+        Ok(())
+    } else {
+        Err(VaultError::RescueUnauthorized)
     }
-    Ok(())
-    let is_pauser = pauser == Some(caller);
-    assert!(
-        is_admin || is_pauser,
-        "unauthorized: caller must be admin or pauser"
-    );
 }
 
 /// Multi-signer threshold validator for governance operations.

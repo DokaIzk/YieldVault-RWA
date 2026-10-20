@@ -173,7 +173,7 @@ source of truth for contract failure behavior.
 | 9 | `LiquidityBufferNotMet` | `invest` would breach minimum idle buffer | Reduce invest amount or wait for deposits |
 | 10 | `ExceedsStrategyCap` | Strategy allocation exceeds cap | Lower allocation amount |
 | 11 | `ExceedsRiskThreshold` | Allocation exceeds risk threshold | Reduce allocation or adjust threshold |
-| 12 | `WithdrawalCooldownActive` | Withdrawal during deposit cooldown | Wait for cooldown window |
+| 12 | `WithdrawalCooldownActive` | Withdrawal during deposit cooldown; also raised by `withdraw` when a large withdrawal is already pending for the user (Issue #1680) | Wait for cooldown window; cancel or execute the pending withdrawal first |
 | 13 | `InvalidMigrationTarget` | Storage migration target invalid; also reused by `update_shipment_status` for an invalid RWA shipment lifecycle transition | Use current or next storage version; use a valid shipment status transition |
 | 14 | `MathOverflow` | Arithmetic overflow guard | Lower amounts; report if unexpected |
 | 15 | `SlippageExceeded` | Strategy slippage limit exceeded | Retry with adjusted bounds |

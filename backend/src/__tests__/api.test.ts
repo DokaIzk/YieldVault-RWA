@@ -44,6 +44,29 @@ describe('Backend API', () => {
     });
   });
 
+  // ─── Security Headers (Issue #1676) ──────────────────────────────────────
+
+  describe('security headers', () => {
+    it('sets security headers on /health', async () => {
+      const response = await request(app).get('/health');
+
+      expect(response.headers['x-content-type-options']).toBe('nosniff');
+      expect(response.headers['x-frame-options']).toBe('DENY');
+      expect(response.headers['content-security-policy']).toBeDefined();
+
+      // HSTS is production-only; it must not be set in the test environment.
+      expect(response.headers['strict-transport-security']).toBeUndefined();
+    });
+
+    it('CSP still allows the Swagger UI docs page to load', async () => {
+      const response = await request(app).get('/docs');
+
+      expect(response.status).toBe(200);
+      expect(response.headers['content-security-policy']).toBeDefined();
+      expect(response.text).toContain('swagger');
+    });
+  });
+
   // ─── Readiness Endpoint Tests ────────────────────────────────────────────
 
   describe('GET /ready', () => {

@@ -41,7 +41,10 @@ pub enum VaultError {
     ExceedsStrategyCap = 10,
     /// Strategy allocation exceeds configured risk threshold.
     ExceedsRiskThreshold = 11,
-    /// Withdrawal blocked due to active deposit cooldown.
+    /// Withdrawal blocked due to an active deposit cooldown, or because the
+    /// user already has a pending large withdrawal that must be executed or
+    /// cancelled with `cancel_withdrawal` before another can be queued
+    /// (Issue #1680).
     WithdrawalCooldownActive = 12,
     /// Requested storage migration target is older than the current stored version.
     ///
